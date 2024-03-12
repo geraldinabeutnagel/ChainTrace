@@ -2,23 +2,25 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("ChainTrace Integration Tests", function () {
+  let traceRegistry;
   let accessControl;
   let auditLog;
   let proofVerifier;
-  let traceRegistry;
   let owner;
   let manufacturer;
   let logistics;
   let retailer;
-  let verifier;
   let auditor;
-  let addrs;
 
   beforeEach(async function () {
-    [owner, manufacturer, logistics, retailer, verifier, auditor, ...addrs] = await ethers.getSigners();
+    [owner, manufacturer, logistics, retailer, auditor] = await ethers.getSigners();
 
-    // Deploy all contracts
-    const AccessControl = await ethers.getContractFactory("ChainTraceAccessControl");
+    // Deploy contracts
+    const TraceRegistry = await ethers.getContractFactory("TraceRegistry");
+    traceRegistry = await TraceRegistry.deploy();
+    await traceRegistry.deployed();
+
+    const AccessControl = await ethers.getContractFactory("AccessControl");
     accessControl = await AccessControl.deploy();
     await accessControl.deployed();
 
@@ -30,259 +32,275 @@ describe("ChainTrace Integration Tests", function () {
     proofVerifier = await ProofVerifier.deploy();
     await proofVerifier.deployed();
 
-    const TraceRegistry = await ethers.getContractFactory("TraceRegistry");
-    traceRegistry = await TraceRegistry.deploy();
-    await traceRegistry.deployed();
-
     // Setup roles
-    await accessControl.connect(owner).grantRoleToOrganization(
-      await accessControl.MANUFACTURER_ROLE(),
-      manufacturer.address
-    );
-    await accessControl.connect(owner).grantRoleToOrganization(
-      await accessControl.LOGISTICS_ROLE(),
-      logistics.address
-    );
-    await accessControl.connect(owner).grantRoleToOrganization(
-      await accessControl.RETAILER_ROLE(),
-      retailer.address
-    );
-    await accessControl.connect(owner).grantRoleToOrganization(
-      await accessControl.VERIFIER_ROLE(),
-      verifier.address
-    );
-    await accessControl.connect(owner).grantRoleToOrganization(
-      await accessControl.AUDITOR_ROLE(),
-      auditor.address
-    );
+    await accessControl.grantRole(await accessControl.MANUFACTURER_ROLE(), manufacturer.address);
+    await accessControl.grantRole(await accessControl.LOGISTICS_ROLE(), logistics.address);
+    await accessControl.grantRole(await accessControl.RETAILER_ROLE(), retailer.address);
+    await accessControl.grantRole(await accessControl.AUDITOR_ROLE(), auditor.address);
   });
 
-  describe("End-to-End Supply Chain Flow", function () {
-    it("Should complete full supply chain traceability flow", async function () {
-      // 1. Register organization
-      await accessControl.connect(manufacturer).registerOrganization(
-        "Acme Manufacturing",
-        "Leading manufacturer",
-        "San Francisco, CA",
-        "contact@acme.com"
-      );
-
-      // 2. Register product
+  describe("Complete Supply Chain Flow", function () {
+    it("Should handle complete product lifecycle", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("TEST_PRODUCT_001"));
+      
+      // 1. Manufacturer registers product
       await traceRegistry.connect(manufacturer).registerProduct(
-        "Smartphone Model X",
-        "Latest smartphone",
-        "Electronics"
+        productId,
+        "Test Product",
+        "Electronics",
+        "A test product for integration testing"
       );
 
-      // 3. Create batch
-      await traceRegistry.connect(manufacturer).createBatch(
-        1,
-        "BATCH001",
-        1000,
-        "0x1234567890abcdef"
+      // Verify product registration
+      const product = await traceRegistry.getProduct(productId);
+      expect(product.name).to.equal("Test Product");
+      expect(product.manufacturer).to.equal(manufacturer.address);
+
+      // 2. Record manufacturing trace
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Manufacturing Facility A",
+        "Production Complete",
+        "Product manufactured and quality checked"
       );
 
-      // 4. Add trace records
-      await traceRegistry.connect(manufacturer).addTraceRecord(
-        1,
-        "Production",
-        "Factory A",
-        "0xabcdef1234567890",
-        "Temperature: 22°C"
-      );
-
-      await traceRegistry.connect(logistics).addTraceRecord(
-        1,
-        "Transport",
+      // 3. Logistics takes over
+      await traceRegistry.connect(logistics).recordTrace(
+        productId,
         "Warehouse B",
-        "0x567890abcdef1234",
-        "Vehicle: TRUCK001"
+        "Received for Shipping",
+        "Product received and prepared for shipment"
       );
 
-      await traceRegistry.connect(retailer).addTraceRecord(
-        1,
-        "Retail",
-        "Store C",
-        "0x901234567890abcd",
-        "Shelf: A1"
+      // 4. Record shipping trace
+      await traceRegistry.connect(logistics).recordTrace(
+        productId,
+        "In Transit",
+        "Shipped",
+        "Product shipped to destination"
       );
 
-      // 5. Verify batch
-      await traceRegistry.connect(verifier).verifyBatch(1, true);
-
-      // 6. Create audit log
-      await auditLog.connect(manufacturer).createAuditLog(
-        0, // SYSTEM_EVENT
-        1, // MEDIUM
-        "Batch Verification",
-        "Batch 1",
-        "Batch verified successfully",
-        ethers.utils.keccak256(ethers.utils.toUtf8Bytes("verification_data")),
-        false
+      // 5. Retailer receives product
+      await traceRegistry.connect(retailer).recordTrace(
+        productId,
+        "Retail Store C",
+        "Received",
+        "Product received at retail location"
       );
 
-      // 7. Add compliance rule
-      await auditLog.connect(auditor).addComplianceRule(
-        "FDA_COMPLIANCE",
-        "Food and Drug Administration compliance"
+      // 6. Auditor performs audit
+      await auditLog.connect(auditor).logEvent(
+        productId,
+        "AUDIT_COMPLETE",
+        "Supply chain audit completed successfully",
+        "All trace records verified"
       );
 
-      // Verify final state
-      const product = await traceRegistry.products(1);
-      const batch = await traceRegistry.batches(1);
-      const traceHistory = await traceRegistry.getBatchTraceHistory(1);
-      const auditEntry = await auditLog.getAuditEntry(1);
-      const complianceRule = await auditLog.getComplianceRule("FDA_COMPLIANCE");
+      // Verify complete trace history
+      const traces = await traceRegistry.getProductHistory(productId);
+      expect(traces.length).to.equal(4); // 4 trace records
 
-      expect(product.name).to.equal("Smartphone Model X");
-      expect(batch.batchNumber).to.equal("BATCH001");
-      expect(batch.isVerified).to.be.true;
-      expect(traceHistory.length).to.equal(3);
-      expect(auditEntry.action).to.equal("Batch Verification");
-      expect(complianceRule.ruleId).to.equal("FDA_COMPLIANCE");
+      // Verify audit log
+      const auditEvents = await auditLog.getAuditEvents(productId);
+      expect(auditEvents.length).to.equal(1);
+    });
+
+    it("Should handle product recall scenario", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("RECALL_PRODUCT_001"));
+      
+      // Register product
+      await traceRegistry.connect(manufacturer).registerProduct(
+        productId,
+        "Recall Test Product",
+        "Food",
+        "A product that will be recalled"
+      );
+
+      // Record some traces
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Manufacturing Facility",
+        "Production Complete",
+        "Product manufactured"
+      );
+
+      // Simulate recall
+      await auditLog.connect(auditor).logEvent(
+        productId,
+        "RECALL_INITIATED",
+        "Product recall initiated due to safety concerns",
+        "Safety issue detected in batch"
+      );
+
+      // Verify recall event
+      const auditEvents = await auditLog.getAuditEvents(productId);
+      expect(auditEvents.length).to.equal(1);
+      expect(auditEvents[0].eventType).to.equal("RECALL_INITIATED");
+    });
+
+    it("Should handle access control properly", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("ACCESS_TEST_001"));
+      
+      // Manufacturer can register product
+      await traceRegistry.connect(manufacturer).registerProduct(
+        productId,
+        "Access Test Product",
+        "Test",
+        "Testing access control"
+      );
+
+      // Non-authorized user should not be able to record trace
+      await expect(
+        traceRegistry.connect(owner).recordTrace(
+          productId,
+          "Unauthorized Location",
+          "Unauthorized Action",
+          "This should fail"
+        )
+      ).to.be.revertedWith("Caller does not have required role");
+
+      // Authorized user should be able to record trace
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Authorized Location",
+        "Authorized Action",
+        "This should succeed"
+      );
+
+      // Verify trace was recorded
+      const traces = await traceRegistry.getProductHistory(productId);
+      expect(traces.length).to.equal(1);
     });
   });
 
-  describe("Multi-Organization Collaboration", function () {
-    it("Should handle multiple organizations working together", async function () {
-      // Register multiple organizations
-      await accessControl.connect(manufacturer).registerOrganization(
-        "Manufacturer A",
-        "Product manufacturer",
-        "Location A",
-        "contact@manufacturer-a.com"
-      );
-
-      await accessControl.connect(logistics).registerOrganization(
-        "Logistics B",
-        "Transport provider",
-        "Location B",
-        "contact@logistics-b.com"
-      );
-
-      await accessControl.connect(retailer).registerOrganization(
-        "Retailer C",
-        "Retail store",
-        "Location C",
-        "contact@retailer-c.com"
-      );
-
-      // Create products from different manufacturers
+  describe("Cross-Contract Interactions", function () {
+    it("Should integrate trace registry with audit log", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("CROSS_CONTRACT_001"));
+      
+      // Register product
       await traceRegistry.connect(manufacturer).registerProduct(
-        "Product A",
-        "Description A",
-        "Category A"
+        productId,
+        "Cross Contract Product",
+        "Test",
+        "Testing cross-contract integration"
       );
 
+      // Record trace
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Test Location",
+        "Test Action",
+        "Test metadata"
+      );
+
+      // Log audit event
+      await auditLog.connect(auditor).logEvent(
+        productId,
+        "TRACE_VERIFIED",
+        "Trace record verified by auditor",
+        "All trace data validated"
+      );
+
+      // Verify both contracts have the data
+      const traces = await traceRegistry.getProductHistory(productId);
+      const auditEvents = await auditLog.getAuditEvents(productId);
+      
+      expect(traces.length).to.equal(1);
+      expect(auditEvents.length).to.equal(1);
+    });
+
+    it("Should handle proof verification integration", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("PROOF_TEST_001"));
+      
+      // Register product
       await traceRegistry.connect(manufacturer).registerProduct(
-        "Product B",
-        "Description B",
-        "Category B"
+        productId,
+        "Proof Test Product",
+        "Test",
+        "Testing proof verification"
       );
 
-      // Create batches
-      await traceRegistry.connect(manufacturer).createBatch(1, "BATCH_A_001", 500, "0xhash1");
-      await traceRegistry.connect(manufacturer).createBatch(2, "BATCH_B_001", 300, "0xhash2");
+      // Record trace
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Proof Location",
+        "Proof Action",
+        "Proof metadata"
+      );
 
-      // Add traces from different actors
-      await traceRegistry.connect(logistics).addTraceRecord(1, "Transport", "Location D", "0xhash3", "Truck 1");
-      await traceRegistry.connect(logistics).addTraceRecord(2, "Transport", "Location E", "0xhash4", "Truck 2");
+      // Simulate proof verification (placeholder)
+      // In a real implementation, this would verify ZK proofs
+      const proofData = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("PROOF_DATA"));
+      
+      // Log proof verification event
+      await auditLog.connect(auditor).logEvent(
+        productId,
+        "PROOF_VERIFIED",
+        "Zero-knowledge proof verified",
+        "Proof data: " + proofData
+      );
 
-      await traceRegistry.connect(retailer).addTraceRecord(1, "Retail", "Store F", "0xhash5", "Shelf 1");
-      await traceRegistry.connect(retailer).addTraceRecord(2, "Retail", "Store G", "0xhash6", "Shelf 2");
-
-      // Verify batches
-      await traceRegistry.connect(verifier).verifyBatch(1, true);
-      await traceRegistry.connect(verifier).verifyBatch(2, true);
-
-      // Verify final state
-      const batch1 = await traceRegistry.batches(1);
-      const batch2 = await traceRegistry.batches(2);
-      const traceHistory1 = await traceRegistry.getBatchTraceHistory(1);
-      const traceHistory2 = await traceRegistry.getBatchTraceHistory(2);
-
-      expect(batch1.batchNumber).to.equal("BATCH_A_001");
-      expect(batch2.batchNumber).to.equal("BATCH_B_001");
-      expect(batch1.isVerified).to.be.true;
-      expect(batch2.isVerified).to.be.true;
-      expect(traceHistory1.length).to.equal(2);
-      expect(traceHistory2.length).to.equal(2);
+      // Verify audit event
+      const auditEvents = await auditLog.getAuditEvents(productId);
+      expect(auditEvents.length).to.equal(1);
+      expect(auditEvents[0].eventType).to.equal("PROOF_VERIFIED");
     });
   });
 
   describe("Error Handling and Edge Cases", function () {
-    it("Should handle invalid operations gracefully", async function () {
-      // Try to create batch for non-existent product
-      await expect(traceRegistry.connect(manufacturer).createBatch(
-        999,
-        "BATCH001",
-        1000,
-        "0x1234567890abcdef"
-      )).to.be.revertedWith("Product not active");
-
-      // Try to verify batch as non-verifier
-      await traceRegistry.connect(manufacturer).registerProduct(
-        "Test Product",
-        "Description",
-        "Category"
-      );
-      await traceRegistry.connect(manufacturer).createBatch(
-        1,
-        "BATCH001",
-        1000,
-        "0x1234567890abcdef"
-      );
-
-      await expect(traceRegistry.connect(manufacturer).verifyBatch(1, true))
-        .to.be.revertedWith("AccessControl: account");
-
-      // Try to add compliance rule as non-auditor
-      await expect(auditLog.connect(manufacturer).addComplianceRule(
-        "TEST_RULE",
-        "Test description"
-      )).to.be.revertedWith("AccessControl: account");
+    it("Should handle non-existent product queries", async function () {
+      const nonExistentProductId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("NON_EXISTENT"));
+      
+      // Querying non-existent product should return empty arrays
+      const traces = await traceRegistry.getProductHistory(nonExistentProductId);
+      expect(traces.length).to.equal(0);
     });
 
-    it("Should handle large numbers of operations", async function () {
-      // Register product
+    it("Should handle duplicate product registration", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("DUPLICATE_TEST_001"));
+      
+      // First registration should succeed
       await traceRegistry.connect(manufacturer).registerProduct(
-        "Test Product",
-        "Description",
-        "Category"
+        productId,
+        "Duplicate Test Product",
+        "Test",
+        "Testing duplicate registration"
       );
 
-      // Create multiple batches
-      for (let i = 1; i <= 10; i++) {
-        await traceRegistry.connect(manufacturer).createBatch(
-          1,
-          `BATCH${i.toString().padStart(3, '0')}`,
-          100,
-          `0x${i.toString().padStart(16, '0')}`
-        );
-      }
+      // Second registration should fail
+      await expect(
+        traceRegistry.connect(manufacturer).registerProduct(
+          productId,
+          "Duplicate Test Product 2",
+          "Test",
+          "This should fail"
+        )
+      ).to.be.revertedWith("Product already exists");
+    });
 
-      // Add multiple trace records
-      for (let i = 1; i <= 10; i++) {
-        await traceRegistry.connect(logistics).addTraceRecord(
-          i,
-          "Transport",
-          `Location ${i}`,
-          `0x${(i + 100).toString().padStart(16, '0')}`,
-          `Truck ${i}`
-        );
-      }
+    it("Should handle empty trace metadata", async function () {
+      const productId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("EMPTY_METADATA_001"));
+      
+      // Register product
+      await traceRegistry.connect(manufacturer).registerProduct(
+        productId,
+        "Empty Metadata Product",
+        "Test",
+        "Testing empty metadata"
+      );
 
-      // Verify all batches
-      for (let i = 1; i <= 10; i++) {
-        await traceRegistry.connect(verifier).verifyBatch(i, true);
-      }
+      // Record trace with empty metadata
+      await traceRegistry.connect(manufacturer).recordTrace(
+        productId,
+        "Test Location",
+        "Test Action",
+        "" // Empty metadata
+      );
 
-      // Verify final state
-      for (let i = 1; i <= 10; i++) {
-        const batch = await traceRegistry.batches(i);
-        expect(batch.batchNumber).to.equal(`BATCH${i.toString().padStart(3, '0')}`);
-        expect(batch.isVerified).to.be.true;
-      }
+      // Verify trace was recorded
+      const traces = await traceRegistry.getProductHistory(productId);
+      expect(traces.length).to.equal(1);
+      expect(traces[0].metadata).to.equal("");
     });
   });
 });
